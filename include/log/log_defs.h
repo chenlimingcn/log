@@ -1,5 +1,5 @@
 /*
-** Copyright (C) 2020 FITSCO.
+** Copyright (C) 2021.
 ** @file common.h
 ** @brief All macros
 ** @author Rimon Chen
