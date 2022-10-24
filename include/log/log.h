@@ -75,8 +75,10 @@ typedef enum
 ** @param _log_mode where the log messages are sent, file, console or both of them
 ** @param _log_level The log critical level, error warning info debug
 ** @param filename If the LOG_LOG_MODE_FILE is set, you must specify where to save log file(this is a single file)
+** @param path The path is used for saving logs
+** @param app_name The app name
 **/
-LOG_API void log_init(int _log_mode, int _log_level, const char* filename);
+LOG_API void log_init(int _log_mode, int _log_level, const char* path, const char* app_name);
 
 /*
 ** output error log message from this API
@@ -105,10 +107,10 @@ LOG_API void log_debug(const char* format, ...);
 /*
 **  Following macros is for convenience, It will print the function name with '()' before the log message
 **/
-#define LOG_ERROR(fmt, ...)         log_error("%s() " fmt , __func__, ##__VA_ARGS__)
-#define LOG_WARNING(fmt, ...)       log_warning("%s() " fmt , __func__, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...)          log_info("%s() " fmt , __func__, ##__VA_ARGS__)
-#define LOG_DEBUG(fmt, ...)         log_debug("%s() " fmt , __func__, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...)         log_error("%s " fmt , __func__, ##__VA_ARGS__)
+#define LOG_WARNING(fmt, ...)       log_warning("%s " fmt , __func__, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)          log_info("%s " fmt , __func__, ##__VA_ARGS__)
+#define LOG_DEBUG(fmt, ...)         log_debug("%s " fmt , __func__, ##__VA_ARGS__)
 
 
 LOG_END_DECLS
