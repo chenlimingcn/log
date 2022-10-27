@@ -13,6 +13,8 @@
 
 #include "os.h"
 #include "log_private.h"
+#include "macros.h"
+#include "buffer.h"
 
 #ifdef _WIN32
 # include <windows.h>
@@ -20,30 +22,13 @@
 # include <sys/time.h>
 #endif // _WIN32
 
-#ifndef FILENAME_MAX
-# define FILENAME_MAX   260
-#endif // FILENAME_MAX
-
-
-#define LOG_MESSAGE_MAX_SIZE       2048
-#define LOG_BUFFER_SIZE            1024*1024*2L   // 2M debug 2048
-#define LOG_FLUSH_INTERVAL_MSEC    5000            // 5s
-#define LOG_FILE_MAX_SIZE          1024*1024*100L // 100M debug 10240//
-
-typedef struct log_file_buffer
-{
-    char *buffer;
-    int length;
-    struct log_file_buffer *next;
-}log_file_buffer_t;
-
 typedef struct log_file_node
 {
 	char filename[FILENAME_MAX];
 	struct log_file_node* next;
 }log_file_node_t;
 
-typedef struct
+typedef struct log_context
 {
     log_mode lm;
     log_level ll;
@@ -64,7 +49,7 @@ typedef struct
     FILE* log_file;
     long  log_file_length;
     pthread_t log_file_tid;
-}log_context;
+}log_context_t;
 
 int _modify_mkdir(const char* path)
 {
@@ -99,7 +84,7 @@ int _modify_mkdir(const char* path)
 	return 0;
 }
 
-void _log_generate_filename(log_context* ctx, char* filename, int length)
+void _log_generate_filename(log_context_t* ctx, char* filename, int length)
 {
     time_t t;
     time(&t);
@@ -108,7 +93,7 @@ void _log_generate_filename(log_context* ctx, char* filename, int length)
     snprintf(filename, FILENAME_MAX, "%s/%s_%s.log", ctx->log_path, ctx->app_name, tmp);
 }
 
-static int _log_load(log_context* ctx)
+static int _log_load(log_context_t* ctx)
 {
 	if (access(ctx->log_path, 0) == -1)
 	{
@@ -199,23 +184,20 @@ static int _log_load(log_context* ctx)
 	return 0;
 }
 
-static log_context* _log_ctx()
+static log_context_t* _log_ctx()
 {
-    static log_context *ctx = NULL;
+    static log_context_t *ctx = NULL;
     
     if (ctx == NULL)
     {
-        ctx = (log_context*)malloc(sizeof(log_context));
-        memset(ctx, 0, sizeof(log_context));
+        ctx = (log_context_t*)malloc(sizeof(log_context_t));
+        memset(ctx, 0, sizeof(log_context_t));
         
         pthread_mutex_init(&ctx->log_buffer_mutex, NULL);
         pthread_cond_init(&ctx->log_buffer_cond, NULL);
         ctx->lm = LOG_MODE_FILE;
         ctx->ll = LOG_LEVEL_WARNING;
-        log_file_buffer_t* log_buffer = (log_file_buffer_t*)malloc(sizeof(log_file_buffer_t));
-        log_buffer->buffer = (char*)malloc(LOG_BUFFER_SIZE + 1);
-        log_buffer->length = 0;
-        log_buffer->next = NULL;
+        log_file_buffer_t* log_buffer = create_buffer();
 
         if (ctx->log_buffer == NULL)
         {
@@ -237,35 +219,43 @@ static log_context* _log_ctx()
     return ctx;
 }
 
-static void _log_out_prepare(long length)
+static void _log_out_prepare(log_context_t* ctx, long length)
 {
-    if (length + _log_ctx()->log_file_length >= LOG_FILE_MAX_SIZE)
+    if (length + ctx->log_file_length >= LOG_FILE_MAX_SIZE)
     {
-        fclose(_log_ctx()->log_file);
-        while (_log_ctx()->log_file_count > 100)
+        fclose(ctx->log_file);
+        while (ctx->log_file_count > 100)
         {
-            log_file_node_t *file = _log_ctx()->log_file_list;
+            log_file_node_t *file = ctx->log_file_list;
             (void)remove(file->filename);
-            _log_ctx()->log_file_list = file->next;
+            ctx->log_file_list = file->next;
+            free(file);
         }
         log_file_node_t *file = (log_file_node_t*)malloc(sizeof(log_file_node_t));
         file->next = NULL;
 
-        _log_ctx()->curr_file = file;
-        _log_generate_filename(_log_ctx(), _log_ctx()->curr_file->filename, FILENAME_MAX);
-        _log_ctx()->log_file = fopen(_log_ctx()->curr_file->filename, "a+");
-        _log_ctx()->log_file_length = 0;
-        if (_log_ctx()->log_file == NULL)
+        _log_generate_filename(ctx, file->filename, FILENAME_MAX);
+        ctx->log_file = fopen(file->filename, "a+");
+        ctx->log_file_length = 0;
+        if (ctx->log_file == NULL)
         {
             free(file);
-            _log_ctx()->curr_file = NULL;
+        }
+        else
+        {
+            if (ctx->curr_file)
+            {
+                ctx->curr_file->next = file;
+            }
+            ctx->curr_file = file;
+            ++ctx->log_file_count;
         }
     }
 
 }
 
 
-static void _log_write_buffer(const char *strmsg)
+static void _log_write_buffer(log_context_t* ctx, const char *strmsg)
 {
     int length = 0;
     int ret = 0;
@@ -276,103 +266,97 @@ static void _log_write_buffer(const char *strmsg)
         return ;
     }
     (void)ret;
-    //_log_out_prepare(_log_ctx()->log_file_length);
-    //ret = fprintf(_log_ctx()->log_file, strmsg);
+    //_log_out_prepare(ctx->log_file_length);
+    //ret = fprintf(ctx->log_file, strmsg);
     //if (ret > 0)
     //{
-    //    _log_ctx()->log_file_length += ret;
+    //    ctx->log_file_length += ret;
     //}
     //return ;
         
-
-
-    pthread_mutex_lock(&_log_ctx()->log_buffer_mutex);
-    while (_log_ctx()->log_curr_buffer->length && length + _log_ctx()->log_curr_buffer->length >= LOG_BUFFER_SIZE) // TODO: send buffer full sinal to save file thread and wait for complete signal
+    pthread_mutex_lock(&ctx->log_buffer_mutex);
+    if (ctx->log_curr_buffer->length && length + ctx->log_curr_buffer->length >= LOG_BUFFER_SIZE) // TODO: send buffer full sinal to save file thread and wait for complete signal
     {
-        //pthread_cond_signal(&_log_ctx()->log_buffer_cond);
+        //pthread_cond_signal(&ctx->log_buffer_cond);
 
-        log_file_buffer_t* log_buffer = (log_file_buffer_t*)malloc(sizeof(log_file_buffer_t));
-        log_buffer->buffer = (char*)malloc(LOG_BUFFER_SIZE + 1);
-        log_buffer->length = 0;
-        log_buffer->next = NULL;
+        log_file_buffer_t* log_buffer = create_buffer();
 
-        if (_log_ctx()->log_buffer == NULL)
+        if (ctx->log_buffer == NULL)
         {
-            _log_ctx()->log_buffer = log_buffer;
+            ctx->log_buffer = log_buffer;
         }
         else
         {
-            _log_ctx()->log_curr_buffer->next = log_buffer;
+            ctx->log_curr_buffer->next = log_buffer;
         }
-        _log_ctx()->log_curr_buffer = log_buffer;
+        ctx->log_curr_buffer = log_buffer;
 
         // common_usleep(1);
     }
-    pthread_mutex_unlock(&_log_ctx()->log_buffer_mutex);
 
+    memcpy(ctx->log_curr_buffer->buffer + ctx->log_curr_buffer->length, strmsg, length);
+    ctx->log_curr_buffer->length += length;
 
-    pthread_mutex_lock(&_log_ctx()->log_buffer_mutex);
-
-    memcpy(_log_ctx()->log_curr_buffer->buffer + _log_ctx()->log_curr_buffer->length, strmsg, length);
-    _log_ctx()->log_curr_buffer->length += length;
-
-    pthread_mutex_unlock(&_log_ctx()->log_buffer_mutex);
+    pthread_mutex_unlock(&ctx->log_buffer_mutex);
 }
 
-static void* _log_timer_func(void* arg)
+static void* _log_timer_func(log_context_t* ctx, void* arg)
 {
-    pthread_mutex_lock(&_log_ctx()->log_buffer_mutex);
-    pthread_cond_signal(&_log_ctx()->log_buffer_cond);
-    pthread_mutex_unlock(&_log_ctx()->log_buffer_mutex);
+    pthread_mutex_lock(&ctx->log_buffer_mutex);
+    pthread_cond_signal(&ctx->log_buffer_cond);
+    pthread_mutex_unlock(&ctx->log_buffer_mutex);
     return arg;
 }
 
 static void* _log_flush_thread(void* arg)
 {
+    log_context_t* ctx = (log_context_t*)arg;
     int ret = 0;
     // TODO: start a timer in this thread. when time is reaching, send timeout signal in timer function
-    //_log_ctx()->log_timer = common_timer_new(LOG_FLUSH_INTERVAL_MSEC, _log_timer_func, NULL);
+    //ctx->log_timer = common_timer_new(LOG_FLUSH_INTERVAL_MSEC, _log_timer_func, NULL);
 
-    while (0)
+    while (1)
     {
+        log_file_buffer_t* tmp = create_buffer();
+        int isFreeTmp = 0;
+
         // TODO: wait for timeout/buffer full sinal
-        pthread_mutex_lock(&_log_ctx()->log_buffer_mutex);
-        // pthread_cond_wait(&_log_ctx()->log_buffer_cond, &_log_ctx()->log_buffer_mutex);
-        if (_log_ctx()->log_curr_buffer ==  NULL)
+        pthread_mutex_lock(&ctx->log_buffer_mutex);
+        // pthread_cond_wait(&ctx->log_buffer_cond, &ctx->log_buffer_mutex);
+        if (ctx->log_buffer ==  NULL && ctx->log_buffer <= 0)
         {
-            pthread_mutex_unlock(&_log_ctx()->log_buffer_mutex);
+            pthread_mutex_unlock(&ctx->log_buffer_mutex);
             usleep(500000);
             continue;
         }
 
-        log_file_buffer_t *buffer = _log_ctx()->log_buffer;
-        if (_log_ctx()->log_curr_buffer == buffer)
+        log_file_buffer_t *buffer = ctx->log_buffer;
+        if (ctx->log_curr_buffer == buffer)
         {
-            log_file_buffer_t* tmp = (log_file_buffer_t*)malloc(sizeof(log_file_buffer_t));
-            tmp->buffer = (char*)malloc(LOG_BUFFER_SIZE + 1);
-            tmp->length = 0;
-            tmp->next = NULL;
-
-            _log_ctx()->log_buffer = tmp;
-            _log_ctx()->log_curr_buffer = tmp;
+            ctx->log_buffer = tmp;
+            ctx->log_curr_buffer = tmp;
         }
         else
         {
-            _log_ctx()->log_buffer = _log_ctx()->log_buffer->next;
+            ctx->log_buffer = ctx->log_buffer->next;
+            isFreeTmp = 1;
         }
 
-        pthread_mutex_unlock(&_log_ctx()->log_buffer_mutex);
+        pthread_mutex_unlock(&ctx->log_buffer_mutex);
 
-        // If the size of the file is greater than LOG_FILE_MAX_SIZE
-        _log_out_prepare(strlen(buffer->buffer));
-        if (buffer->length > 0)
+        if (isFreeTmp)
         {
-            ret = fprintf(_log_ctx()->log_file, "%s", buffer->buffer);
+            free_buffer(tmp);
+        }
+        // If the size of the file is greater than LOG_FILE_MAX_SIZE
+        _log_out_prepare(ctx, strlen(buffer->buffer));
+        if (buffer->length > 0 && ctx->log_file)
+        {
+            ret = fprintf(ctx->log_file, "%s", buffer->buffer);
             if (ret > 0)
             {
-                _log_ctx()->log_file_length += ret;
+                ctx->log_file_length += ret;
             }
-            fflush(_log_ctx()->log_file);
 
             free(buffer->buffer);
             free(buffer);
@@ -382,7 +366,7 @@ static void* _log_flush_thread(void* arg)
     return arg;
 }
 
-static void _log_out(int prio, const char* strmsg)
+static void _log_out(log_context_t* ctx, int prio, const char* strmsg)
 {
     int ret = 0;
     char output[LOG_MESSAGE_MAX_SIZE+1] = {0};
@@ -408,25 +392,26 @@ static void _log_out(int prio, const char* strmsg)
         output[LOG_MESSAGE_MAX_SIZE + 0] = '\0';
     }
 
-    if (_log_ctx()->lm & LOG_MODE_CONSOLE)
+    if (ctx->lm & LOG_MODE_CONSOLE)
     {
         fprintf(out_console[prio], "%s", output);
     }
-    if ( (_log_ctx()->lm & LOG_MODE_FILE) 
-            && _log_ctx()->log_file != NULL)
+    if ( (ctx->lm & LOG_MODE_FILE) 
+            && ctx->log_file != NULL)
     {
-        _log_write_buffer(output);
+        _log_write_buffer(ctx, output);
     }
 }
 
 void log_error(const char* format, ...)
 {
+    log_context_t* ctx = _log_ctx();
     int ret = 0;
     char output[LOG_MESSAGE_MAX_SIZE+1] = {0};
     va_list args;
     va_start(args, format);
 
-    if (LOG_LEVEL_ERROR > (int)_log_ctx()->ll)
+    if (LOG_LEVEL_ERROR > (int)ctx->ll)
     {
         return ;
     }
@@ -444,17 +429,18 @@ void log_error(const char* format, ...)
         output[LOG_MESSAGE_MAX_SIZE - 1] = '\n';
         output[LOG_MESSAGE_MAX_SIZE + 0] = '\0';
     }
-    _log_out(LOG_LEVEL_ERROR, output);
+    _log_out(ctx, LOG_LEVEL_ERROR, output);
     va_end(args);
 }
 
 void log_warning(const char* format, ...)
 {
+    log_context_t* ctx = _log_ctx();
     int ret = 0;
     char output[LOG_MESSAGE_MAX_SIZE+1] = {0};
     va_list args;
 
-    if (LOG_LEVEL_WARNING > (int)_log_ctx()->ll)
+    if (LOG_LEVEL_WARNING > (int)ctx->ll)
     {
         return ;
     }
@@ -474,17 +460,18 @@ void log_warning(const char* format, ...)
         output[LOG_MESSAGE_MAX_SIZE - 1] = '\n';
         output[LOG_MESSAGE_MAX_SIZE + 0] = '\0';
     }
-    _log_out(LOG_LEVEL_WARNING, output);
+    _log_out(ctx, LOG_LEVEL_WARNING, output);
     va_end(args);
 }
 
 void log_info(const char* format, ...)
 {
+    log_context_t* ctx = _log_ctx();
     int ret = 0;
     char output[LOG_MESSAGE_MAX_SIZE+1] = {0};
     va_list args;
 
-    if (LOG_LEVEL_INFO > (int)_log_ctx()->ll)
+    if (LOG_LEVEL_INFO > (int)ctx->ll)
     {
         return ;
     }
@@ -503,17 +490,18 @@ void log_info(const char* format, ...)
         output[LOG_MESSAGE_MAX_SIZE - 1] = '\n';
         output[LOG_MESSAGE_MAX_SIZE + 0] = '\0';
     }
-    _log_out(LOG_LEVEL_INFO, output);
+    _log_out(ctx, LOG_LEVEL_INFO, output);
     va_end(args);
 }
 
 void log_debug(const char* format, ...)
 {
+    log_context_t* ctx = _log_ctx();
     int ret = 0;
     char output[LOG_MESSAGE_MAX_SIZE+1] = {0};
     va_list args;
 
-    if (LOG_LEVEL_DEBUG > (int)_log_ctx()->ll)
+    if (LOG_LEVEL_DEBUG > (int)ctx->ll)
     {
         return ;
     }
@@ -532,17 +520,19 @@ void log_debug(const char* format, ...)
         output[LOG_MESSAGE_MAX_SIZE - 1] = '\n';
         output[LOG_MESSAGE_MAX_SIZE + 0] = '\0';
     }
-    _log_out(LOG_LEVEL_DEBUG, output);
+    _log_out(ctx, LOG_LEVEL_DEBUG, output);
     va_end(args);
 }
 
 
 void log_init(int _log_mode, int _log_level, const char* path, const char* app_name)
 {
-    _log_ctx()->lm = (log_mode)_log_mode;
-    _log_ctx()->ll = (log_level)_log_level;
+    log_context_t* ctx = _log_ctx();
 
-     if (_log_ctx()->lm & LOG_MODE_FILE)
+    ctx->lm = (log_mode)_log_mode;
+    ctx->ll = (log_level)_log_level;
+
+     if (ctx->lm & LOG_MODE_FILE)
     {
         if (path == NULL)
         {
@@ -556,15 +546,15 @@ void log_init(int _log_mode, int _log_level, const char* path, const char* app_n
             return ;
         }
 
-        strncpy(_log_ctx()->log_path, path, FILENAME_MAX);
-        strncpy(_log_ctx()->app_name, app_name, FILENAME_MAX);
+        strncpy(ctx->log_path, path, FILENAME_MAX);
+        strncpy(ctx->app_name, app_name, FILENAME_MAX);
 
-       if (-1 == _log_load( _log_ctx()))
+       if (-1 == _log_load( ctx))
        {
             fprintf(stderr, "log load fail!");
             return ;
        }
 
-        pthread_create(&_log_ctx()->log_file_tid, NULL, _log_flush_thread, NULL);
+        pthread_create(&ctx->log_file_tid, NULL, _log_flush_thread, ctx);
     }
 }
