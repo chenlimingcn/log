@@ -1,14 +1,23 @@
 #ifndef LOG_BUFFER_H__
 #define LOG_BUFFER_H__
 
-typedef struct log_file_buffer
+#include <pthread.h>
+
+typedef struct log_buffer_node
 {
     char *buffer;
     int length;
-    struct log_file_buffer *next;
-}log_file_buffer_t;
+    struct log_buffer_node *next;
+}log_buffer_node_t;
 
-extern log_file_buffer_t* create_buffer();
-extern void free_buffer(log_file_buffer_t* buffer);
+extern log_buffer_node_t* create_buffer();
+extern void free_buffer(log_buffer_node_t* buffer);
+
+typedef struct log_buffer_pool
+{
+    log_buffer_node_t* header;
+    log_buffer_node_t* current;
+    pthread_mutex_t*   mutex;
+}log_buffer_pool_t;
 
 #endif//LOG_BUFFER_H__
